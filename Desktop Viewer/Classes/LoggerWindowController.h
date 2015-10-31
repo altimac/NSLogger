@@ -34,7 +34,7 @@
 @class LoggerMessageCell, LoggerClientInfoCell, LoggerMarkerCell, LoggerTableView, LoggerSplitView;
 @class LoggerDetailsWindowController;
 
-@interface LoggerWindowController : NSWindowController <NSWindowDelegate, LoggerConnectionDelegate, NSTableViewDataSource, NSTableViewDelegate>
+@interface LoggerWindowController : NSWindowController <NSWindowDelegate, LoggerConnectionDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSplitViewDelegate>
 {
 	IBOutlet LoggerTableView *logTable;
 	IBOutlet NSTableView *filterSetsTable;
@@ -126,4 +126,7 @@
 {
 }
 @end
+
+#define	DEFAULT_THREAD_COLUMN_WIDTH	85.0f
+
 

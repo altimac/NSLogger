@@ -29,6 +29,7 @@
  * 
  */
 #import <Security/SecItem.h>
+#import <HockeySDK/HockeySDK.h>
 #import "LoggerAppDelegate.h"
 #import "LoggerNativeTransport.h"
 #import "LoggerWindowController.h"
@@ -36,8 +37,10 @@
 #import "LoggerDocumentController.h"
 #import "LoggerStatusWindowController.h"
 #import "LoggerPrefsWindowController.h"
+#import "LoggerMessageCell.h"
 
 NSString * const kPrefKeepMultipleRuns = @"keepMultipleRuns";
+NSString * const kPrefCloseWithoutSaving = @"closeWithoutSaving";
 
 NSString * const kPrefPublishesBonjourService = @"publishesBonjourService";
 NSString * const kPrefHasDirectTCPIPResponder = @"hasDirectTCPIPResponder";
@@ -177,13 +180,14 @@ NSString * const kPref_ApplicationFilterSet = @"appFilterSet";
 	}
 	@catch (NSException * e)
 	{
-		NSLog(@"Catched exception while trying to archive filters: %@", e);
+		NSLog(@"Caught exception while trying to archive filters: %@", e);
 	}
 }
 
 - (void)prefsChangeNotification:(NSNotification *)note
 {
 	[self performSelector:@selector(startStopTransports) withObject:nil afterDelay:0];
+    [LoggerMessageCell loadAdvancedColors];
 }
 
 - (void)startStopTransports
@@ -221,6 +225,16 @@ NSString * const kPref_ApplicationFilterSet = @"appFilterSet";
 
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification
 {
+	// Initialize HockeyApp if properly configured
+	NSDictionary *hockeyConf = [NSDictionary dictionaryWithContentsOfFile:[[NSBundle mainBundle] pathForResource:@"HockeyConf" ofType:@"plist"]];
+	NSString *hockeyAppID = [hockeyConf objectForKey:@"appID"];
+	if ([hockeyAppID isKindOfClass:[NSString class]] && [hockeyAppID length])
+	{
+		BITHockeyManager *shm = [BITHockeyManager sharedHockeyManager];
+		[shm configureWithIdentifier:hockeyAppID];
+		[shm startManager];
+	}
+	
 	// Listen to prefs change notifications, where we start / stop transports on demand
 	[[NSNotificationCenter defaultCenter] addObserver:self
 											 selector:@selector(prefsChangeNotification:)
@@ -229,6 +243,9 @@ NSString * const kPref_ApplicationFilterSet = @"appFilterSet";
 	// Prepare the logger status
 	statusController = [[LoggerStatusWindowController alloc] initWithWindowNibName:@"LoggerStatus"];
 	[statusController showWindow:self];
+
+    // This window is rarely useful. But the best would probably be to open it in case of error.
+    [statusController close];
 
 	/* initialize all supported transports */
 	
@@ -345,6 +362,11 @@ NSString * const kPref_ApplicationFilterSet = @"appFilterSet";
 	[prefsController showWindow:sender];
 }
 
+- (IBAction)showStatus:(id)sender
+{
+    [statusController.window makeKeyAndOrderFront:nil];
+}
+
 - (void)relaunchApplication
 {
 	NSString *appToRelaunch = [[NSBundle mainBundle] bundlePath];
@@ -403,7 +425,7 @@ NSString * const kPref_ApplicationFilterSet = @"appFilterSet";
 					CFStringRef commonName = NULL;
 					if (SecCertificateCopyCommonName(certRef, &commonName) == noErr)
 					{
-						if (commonName != NULL && CFStringCompare(commonName, CFSTR("NSLogger SSL"), 0) == kCFCompareEqualTo)
+						if (commonName != NULL && CFStringCompare(commonName, CFSTR("NSLogger self-signed SSL"), 0) == kCFCompareEqualTo)
 						{
 							// We found our identity
 							CFTypeRef values[] = {

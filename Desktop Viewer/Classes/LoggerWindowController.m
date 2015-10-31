@@ -35,12 +35,12 @@
 #import "LoggerClientInfoCell.h"
 #import "LoggerMarkerCell.h"
 #import "LoggerMessage.h"
-#import "LoggerUtils.h"
 #import "LoggerAppDelegate.h"
 #import "LoggerCommon.h"
 #import "LoggerDocument.h"
+#import "LoggerSplitView.h"
 
-#define	DEFAULT_THREAD_COLUMN_WIDTH	85.0f
+#define kMaxTableRowHeight @"maxTableRowHeight"
 
 @interface LoggerWindowController ()
 @property (nonatomic, retain) NSString *info;
@@ -160,6 +160,7 @@ static NSArray *sXcodeFileExtensions = nil;
 	[filterListController addObserver:self forKeyPath:@"selectedObjects" options:0 context:NULL];
 
 	buttonBar.splitViewDelegate = self;
+    splitView.delegate = self;
 
 	[self rebuildQuickFilterPopup];
 	[self updateFilterPredicate];
@@ -173,6 +174,8 @@ static NSArray *sXcodeFileExtensions = nil;
 											 selector:@selector(tileLogTableNotification:)
 												 name:@"TileLogTableNotification"
 											   object:nil];
+    
+    [[NSUserDefaults standardUserDefaults] addObserver:self forKeyPath:kMaxTableRowHeight options:0 context:NULL];
 }
 
 - (NSString *)windowTitleForDocumentDisplayName:(NSString *)displayName
@@ -212,6 +215,11 @@ static NSArray *sXcodeFileExtensions = nil;
 					   group:(dispatch_group_t)group
 {
 	NSMutableArray *updatedMessages = [[NSMutableArray alloc] initWithCapacity:[messages count]];
+    NSSize maxCellSize = tableSize;
+    NSInteger maxRowHeight = [[NSUserDefaults standardUserDefaults] integerForKey:kMaxTableRowHeight];
+    if (maxRowHeight >= 30 && maxCellSize.height > maxRowHeight)
+        maxCellSize.height = maxRowHeight;
+    
 	for (LoggerMessage *msg in messages)
 	{
 		// detect cancellation
@@ -231,14 +239,14 @@ static NSArray *sXcodeFileExtensions = nil;
 				case LOGMSG_TYPE_LOG:
 				case LOGMSG_TYPE_BLOCKSTART:
 				case LOGMSG_TYPE_BLOCKEND:
-					newHeight = [LoggerMessageCell heightForCellWithMessage:msg threadColumnWidth:threadColumnWidth maxSize:tableSize showFunctionNames:showFunctionNames];
+					newHeight = [LoggerMessageCell heightForCellWithMessage:msg threadColumnWidth:threadColumnWidth maxSize:maxCellSize showFunctionNames:showFunctionNames];
 					break;
 				case LOGMSG_TYPE_CLIENTINFO:
 				case LOGMSG_TYPE_DISCONNECT:
-					newHeight = [LoggerClientInfoCell heightForCellWithMessage:msg threadColumnWidth:threadColumnWidth maxSize:tableSize showFunctionNames:showFunctionNames];
+					newHeight = [LoggerClientInfoCell heightForCellWithMessage:msg threadColumnWidth:threadColumnWidth maxSize:maxCellSize showFunctionNames:showFunctionNames];
 					break;
 				case LOGMSG_TYPE_MARK:
-					newHeight = [LoggerMarkerCell heightForCellWithMessage:msg threadColumnWidth:threadColumnWidth maxSize:tableSize showFunctionNames:showFunctionNames];
+					newHeight = [LoggerMarkerCell heightForCellWithMessage:msg threadColumnWidth:threadColumnWidth maxSize:maxCellSize showFunctionNames:showFunctionNames];
 					break;
 			}
 			if (newHeight != cachedHeight)
@@ -329,6 +337,13 @@ static NSArray *sXcodeFileExtensions = nil;
 	[self tileLogTable:YES];
 	[logTable reloadData];
 }
+
+#pragma mark Target Action
+
+- (IBAction)performFindPanelAction:(id)sender {
+    [self.window makeFirstResponder:quickFilterTextField];
+}
+
 
 // -----------------------------------------------------------------------------
 #pragma mark -
@@ -587,6 +602,25 @@ static NSArray *sXcodeFileExtensions = nil;
 //	tableNeedsTiling = YES;
 }
 
+- (void)splitView:(NSSplitView *)sender resizeSubviewsWithOldSize:(NSSize)oldSize {
+    if (sender == splitView) {
+        NSSize newSize = sender.bounds.size;
+        
+        NSView *mainDisplay = [[sender subviews] objectAtIndex:1];
+        NSRect frame = mainDisplay.frame;
+        frame.size.width += newSize.width - oldSize.width;
+        frame.size.height += newSize.height - oldSize.height;
+        [mainDisplay setFrame:frame];
+        
+        NSView *sidebar = [[sender subviews] objectAtIndex:0];
+        NSRect sidebarFrame = sidebar.frame;
+        sidebarFrame.size.height = newSize.height;
+        [sidebar setFrame:sidebarFrame];
+    } else {
+        [sender adjustSubviews];
+    }
+}
+
 // -----------------------------------------------------------------------------
 #pragma mark -
 #pragma mark Window delegate
@@ -775,66 +809,100 @@ static NSArray *sXcodeFileExtensions = nil;
 	[detailsWindowController showWindow:self];
 }
 
-- (void)xedFile:(NSString *)path line:(NSString *)line { 
+void runSystemCommand(NSString *cmd)
+{
+    [[NSTask launchedTaskWithLaunchPath:@"/bin/sh"
+                              arguments:[NSArray arrayWithObjects:@"-c", cmd, nil]] waitUntilExit];
+}
+
+- (IBAction)openDetailsInExternalEditor:(id)sender
+{
+    NSArray *msgs = [displayedMessages objectsAtIndexes:[logTable selectedRowIndexes]];
+    NSString *txtMsg = [[msgs lastObject] textRepresentation];
+
+    NSString *globallyUniqueStr = [[NSProcessInfo processInfo] globallyUniqueString];
+    NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:globallyUniqueStr];
+
+    [txtMsg writeToFile:tempPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    NSString *cmd = [NSString stringWithFormat:@"open -t %@", tempPath];
+    runSystemCommand(cmd);
+}
+
+- (void)xedFile:(NSString *)path line:(NSString *)line client:(NSString *)client {
     id args = [NSArray arrayWithObjects:
                @"-l",
                line,
                path,
+               client,
                nil];
     // NSLog(@"Args %@", args);
     [NSTask launchedTaskWithLaunchPath:[[NSBundle mainBundle] pathForResource:@"xedReplacement.sh" ofType:nil]
                              arguments:args];
 }
 
-- (void)logCellDoubleClicked:(id)sender
+- (void)openDetailsInIDE
 {
-	// Added in v1.1: alt-double click opens the source file if it was defined in the log
-	// and the file is found
-	NSEvent *event = [NSApp currentEvent];
-	if ([event clickCount] > 1 && ([NSEvent modifierFlags] & NSAlternateKeyMask) != 0)
+	NSInteger row = [logTable selectedRow];
+	if (row >= 0 && row < [displayedMessages count])
 	{
-		NSInteger row = [logTable selectedRow];
-		if (row >= 0 && row < [displayedMessages count])
+		LoggerMessage *msg = [displayedMessages objectAtIndex:row];
+		NSString *filename = msg.filename;
+		if ([filename length])
 		{
-			LoggerMessage *msg = [displayedMessages objectAtIndex:row];
-			NSString *filename = msg.filename;
-			if ([filename length])
+			NSFileManager *fm = [[NSFileManager alloc] init];
+			if ([fm fileExistsAtPath:filename])
 			{
-				NSFileManager *fm = [[NSFileManager alloc] init];
-				if ([fm fileExistsAtPath:filename])
+				// If the file is .h, .m, .c, .cpp, .h, .hpp: open the file
+				// using xed. Otherwise, open the file with the Finder. We really don't
+				// know which IDE the user is running if it's not Xcode
+				// (when logging from Android, could be IntelliJ or Eclipse)
+				NSString *extension = [filename pathExtension];
+				BOOL useXcode = NO;
+				//if ([fm fileExistsAtPath:@"/usr/bin/xed"])
+				//{
+				for (NSString *ext in sXcodeFileExtensions)
 				{
-					// If the file is .h, .m, .c, .cpp, .h, .hpp: open the file
-					// using xed. Otherwise, open the file with the Finder. We really don't
-					// know which IDE the user is running if it's not Xcode
-					// (when logging from Android, could be IntelliJ or Eclipse)
-					NSString *extension = [filename pathExtension];
-					BOOL useXcode = NO;
-                    //if ([fm fileExistsAtPath:@"/usr/bin/xed"])
-                    //{
-                    for (NSString *ext in sXcodeFileExtensions)
-                    {
-                        if ([ext caseInsensitiveCompare:extension] == NSOrderedSame)
-                        {
-                            useXcode = YES;
-                            break;
-                        }
-                    }
-                    //}
-					if (useXcode)
-					{                        
-                        [self xedFile:filename 
-                                 line:[NSString stringWithFormat:@"%d", MAX(0, msg.lineNumber) + 1]];
-					}
-					else
+					if ([ext caseInsensitiveCompare:extension] == NSOrderedSame)
 					{
-						[[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:filename]];
+						useXcode = YES;
+						break;
 					}
+				}
+				//}
+				if (useXcode)
+				{
+					[self xedFile:filename
+							 line:[NSString stringWithFormat:@"%d", MAX(0, msg.lineNumber)]
+						   client:[attachedConnection clientName]];
+				}
+				else
+				{
+					[[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:filename]];
 				}
 			}
 		}
-		return;
 	}
-	[self openDetailsWindow:sender];
+}
+
+- (void)logCellDoubleClicked:(id)sender
+{
+    // double click opens the selection in the detail view
+	// command-double click opens the source file if it was defined in the log and the file is found (using alt can mess with the results of the AppleScript)
+	// alt-doubleclick opens the selection in external editor
+	NSEvent *event = [NSApp currentEvent];
+    if ([event clickCount] > 1 && ([NSEvent modifierFlags] & (NSFunctionKeyMask | NSCommandKeyMask)) != 0)
+    {
+		[self openDetailsInIDE];
+    }
+    else if ([event clickCount] > 1 && ([NSEvent modifierFlags] & NSAlternateKeyMask) != 0)
+    {
+        [self openDetailsInExternalEditor:sender];
+    }
+    else if ([event clickCount] > 1)
+    {
+        [self openDetailsWindow:sender];
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -1162,7 +1230,13 @@ didReceiveMessages:(NSArray *)theMessages
 		{
 			[self rememberFiltersSelection];
 		}
-	}
+	} else if (object == [NSUserDefaults standardUserDefaults])
+    {
+        if ([keyPath isEqualToString:kMaxTableRowHeight])
+        {
+            [self tileLogTable:YES];
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -1618,7 +1692,7 @@ didReceiveMessages:(NSArray *)theMessages
 	}
 	else for (LoggerMessage *mark in marks)
 	{
-		NSMenuItem *markItem = [[NSMenuItem alloc] initWithTitle:mark.message
+		NSMenuItem *markItem = [[NSMenuItem alloc] initWithTitle:mark.message ?: @""
 														  action:@selector(jumpToMark:)
 												   keyEquivalent:@""];
 		[markItem setRepresentedObject:mark];
